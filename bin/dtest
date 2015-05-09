@@ -1,0 +1,315 @@
+#!/usr/bin/env python2
+
+#
+# Copyright (C) 2015 Prevas A/S
+#
+# This file is part of dtest, an embedded device test framework
+#
+# dtest is free software; you can redistribute it and/or modify it under the
+# terms of the GNU Lesser General Public License as published by the Free
+# Software Foundation; either version 2.1 of the License, or (at your option)
+# any later version.
+#
+# dtest is distributed in the hope that it will be useful, but WITHOUT ANY
+# WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+# FOR A PARTICULAR PURPOSE.  See the GNU Lesser General Public License for
+# more details.
+#
+# You should have received a copy of the GNU Lesser General Public License
+# along with this library; if not, write to the Free Software Foundation,
+# Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+#
+
+import unittest
+import sys
+import os
+import errno
+import logging
+import argparse
+import tempfile
+import datetime
+import shutil
+
+
+def CleanDir(path):
+        if os.path.exists(path):
+                if sys.platform.lower().startswith('win'):
+                        # Windows shutil.rmtree fails due to the mklinks - remove them manually
+                        if os.path.exists(os.path.join(path,'latest')):
+                                logger.debug('Windows: rmdir latest')
+                                os.rmdir(unicode(os.path.join(path,'latest')))
+                        if os.path.exists(os.path.join(path,'success-latest')):
+                                logger.debug('Windows: rmdir success-latest')
+                                os.rmdir(unicode(os.path.join(path,'success-latest')))
+                        if os.path.exists(os.path.join(path,'failure-latest')):
+                                logger.debug('Windows: rmdir failure-latest')
+                                os.rmdir(unicode(os.path.join(path,'failure-latest')))
+
+                logger.debug('CleanDir: %s dir exists already'%(path))
+                # Clean all sub dirs
+                logger.debug('clean dir: %s', path)
+                # rmtree fails if the path is not provide as unicode:
+                # WindowsError: [Error 123] The filename, directory name, or volume label syntax is incorrect: '\\\\?\
+                # \c:\\buildbot-slaveSVAV\\sdk-test-runner\\oe-lite\\test\\result/*.*'
+                shutil.rmtree(unicode(path))
+                logger.debug('cleaned dir: %s', path)
+
+def ConvertPathToUnc(path):
+    # On Windows it is problem to make directories with a relative long absolute paths (>256).
+    # To overcome this issue the paths must be prepended with '\\?\'.
+    # See http://msdn.microsoft.com/en-us/library/windows/desktop/aa365247%28v=vs.85%29.aspx
+    # In order to get the details. Prepending with \\?\ results in paths with a maximum length of 32,767 characters can be created.
+
+    result=os.path.abspath(path)
+
+    if sys.platform.lower().startswith('win'):
+        (unc, rest) = os.path.splitunc(result)
+        if not unc:
+                # Not an unc path, so add it
+                unc = '\\\\?\\'
+        result = unc + os.path.normpath(rest)
+
+    return result
+
+if sys.platform.lower().startswith('win') :
+	__CSL = None
+	def symlink(source_name, link_name):
+		'''symlink(source, link_name)
+		Creates a symbolic link pointing to source named link_name'''
+		if os.path.exists(link_name):
+			os.rmdir(link_name)
+		import subprocess
+		cmdprocess = subprocess.call("cmd /c mklink /J "+link_name+" "+source_name, stdout=subprocess.PIPE, stdin=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+	os.symlink = symlink
+
+	def force_symlink(file1, file2):
+	    os.symlink(file1, file2)
+
+else:
+	def force_symlink(file1, file2):
+	    try:
+		os.symlink(file1, file2)
+	    except OSError, e:
+		if e.errno == errno.EEXIST:
+		    os.remove(file2)
+
+		    os.symlink(file1, file2)
+
+
+if __name__ == "__main__":
+
+    del sys.path[0]
+    try:
+        import dtest
+    except ImportError:
+        # Give the user some help
+        print "\n%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%"
+        print "Running on windows?"
+        print "Try to execute using full path or with './' in front of 'bin/dtest'"
+        print "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%\n"
+        # and re-raise the exception
+        raise
+
+    parser = argparse.ArgumentParser(
+        prog=dtest.prog,
+        description='Run test case or suite.')
+    parser.add_argument('--version', action='version',
+                        version='%s %s'%(dtest.prog, dtest.version))
+
+    parser.add_argument('-q', '--quiet', action='count',
+                        help="less output")
+    parser.add_argument('-v', '--verbose', action='count',
+                        help="more output")
+
+    parser.add_argument('--cleantmp', action='store_true',
+                        help="Clean tmp folder prior to test"
+                        )
+
+    parser.add_argument('--cleanresult', action='store_true',
+                        help="Clean entire result folder prior to test. Note: cleanup will not be done if -g (--gen-report) specified"
+                        )
+
+    parser.add_argument('-c', '--config-file', action='store', type=str,
+                        default='dtest.cfg',
+                        help="configuration file [default: %(default)s]")
+
+    parser.add_argument('-r', '--result-dir', action='store', type=str,
+                        default='result/',
+                        help="result/output directory"
+                        " [default: %(default)s]")
+    parser.add_argument('-t', '--tmp-dir', action='store', type=str,
+                        default='tmp/',
+                        help="directory to use for temporary output"
+                        " [default: %(default)s]")
+
+    parser.add_argument('-g', '--gen-report', action='store_true',
+                        help="do not start testing - genererate report instead. Specify the "
+                        "report name e.g. report.html as the TEST argument. "
+                        "The given result dir will be used as the input for the report. "
+                        " [default: %(default)s]"
+                        " Example: dtest -g -c report_config.yaml -r previous_result report.html ")
+    parser.add_argument('-s', '--store', action='store_true',
+                        help="do not start testing - save instead. Specify the "
+                        "a name e.g. report.json as the TEST argument. "
+                        "The given result dir will be used as the input for the report. "
+                        " [default: %(default)s]"
+                        " Example: dtest -s -c report_config.yaml -r previous_result report.json ")
+    parser.add_argument('test', metavar='TEST', type=str, nargs='+',
+                        help="test case or suite to run")
+
+    args = parser.parse_args()
+
+    if args.quiet and args.verbose:
+        parser.error('both quiet and verbose mode specified')
+
+    logger = logging.getLogger()
+    if args.verbose > 1:
+        logger.setLevel(logging.DEBUG)
+    elif args.verbose == 1:
+        logger.setLevel(logging.INFO)
+    elif args.verbose is None:
+        logger.setLevel(logging.WARNING)
+    elif args.quiet == 1:
+        logger.setLevel(logging.ERROR)
+    elif args.quiet > 1:
+        logger.setLevel(logging.CRITICAL)
+
+    dtest.logger = logger
+
+    testhome = os.getcwd()
+    logging.debug("testhome %s"%(testhome))
+
+    if sys.path[0] == "":
+        path_index = 1
+    else:
+        path_index = 0
+
+    import dtest.testsetup
+    testsetup = dtest.testsetup.load(args.config_file)
+    if not testsetup:
+        logging.critical("testsetup missing")
+        sys.exit(2)
+
+    try:
+        dtestpath = os.environ['DTESTPATH'].split(os.pathsep)
+    except KeyError:
+        dtestpath = [ "suite" ]
+
+    logging.debug("dtestpath %s"%(dtestpath))
+
+    dtestpath = [ os.path.join(testhome, p) for p in dtestpath ]
+    logging.debug("dtestpath after testhome joining: %s"%(dtestpath))
+
+    for p in reversed(dtestpath):
+        sys.path.insert(path_index, p)
+
+    tmp_dir_base_abs = ConvertPathToUnc(args.tmp_dir)
+
+    # Check if the tmp dir exist prior to possible cleanup
+    if args.cleantmp:
+            logger.debug('cleantmp option given')
+            CleanDir(tmp_dir_base_abs)
+
+    # Create unique top level directory name for this test run
+    run_name = "dtest-run-"+datetime.datetime.today().strftime("%Y-%m-%dT%H.%M.%S")
+
+    tmp_dir = os.path.join(tmp_dir_base_abs, run_name)
+    tmp_dir = os.path.abspath(tmp_dir)
+    os.makedirs(tmp_dir)
+
+    logger.debug('using tmp dir: %s', tmp_dir)
+
+    if args.gen_report:
+            print "In report generation mode"
+            report_name = args.test[0]
+            report_args = args.test[1:]
+            logger.debug('generate report mode with report name: %s',report_name)
+            logger.debug('generate report mode with additional args: %s',report_args)
+            import dtest.report_gen
+
+            report_generator = dtest.report_gen.ReportGenerator(result_dir=args.result_dir,tmp_dir=tmp_dir,config_file=args.config_file, report_name=report_name, report_args=report_args)
+            try:
+                    report_generator.report_gen()
+            except:
+                    force_symlink(tmp_dir, os.path.join('tmp', 'failure-latest'))
+                    force_symlink(tmp_dir, os.path.join('tmp', 'latest'))
+                    # Re-raise the exception after setting the links
+                    raise
+
+            force_symlink(tmp_dir, os.path.join('tmp', 'success-latest'))
+            force_symlink(tmp_dir, os.path.join('tmp', 'latest'))
+            # Do not start any test - just exit in report mode
+            sys.exit(0)
+
+    if args.store:
+            print "In store metrics mode"
+            report_name = args.test[0]
+            report_args = args.test[1:]
+            logger.debug('generate store metrics mode with report name: %s',report_name)
+            logger.debug('generate store metrics mode with additional args: %s',report_args)
+            import dtest.report_gen
+
+            store_metrics = dtest.report_gen.StoreMetrics(result_dir=args.result_dir,tmp_dir=tmp_dir,config_file=args.config_file, report_name=report_name, report_args=report_args)
+            try:
+                    store_metrics.report_gen()
+                    store_metrics.gen_plots()
+            except:
+                    force_symlink(tmp_dir, os.path.join('tmp', 'failure-latest'))
+                    force_symlink(tmp_dir, os.path.join('tmp', 'latest'))
+                    # Re-raise the exception after setting the links
+                    raise
+
+            force_symlink(tmp_dir, os.path.join('tmp', 'success-latest'))
+            force_symlink(tmp_dir, os.path.join('tmp', 'latest'))
+
+            sys.exit(0)
+
+    result_dir_base_abs = ConvertPathToUnc(args.result_dir)
+
+    # Check if the tmp dir exist prior to possible cleanup
+    if args.cleanresult:
+            logger.debug('cleanresult option given')
+            CleanDir(result_dir_base_abs)
+
+    result_dir = os.path.join(result_dir_base_abs, run_name)
+    os.makedirs(result_dir)
+    result_dir = os.path.abspath(result_dir)
+
+    logger.debug('using result dir: %s', result_dir)
+
+    # Create the symlinks prior to loading - as it might assert
+    force_symlink(result_dir, os.path.join('result', 'latest'))
+    force_symlink(tmp_dir, os.path.join('tmp', 'latest'))
+
+    logger.debug('tests to run: %s'%(args.test))
+    try:
+            import dtest.loader
+            loader = dtest.loader.DTestLoader(
+                    path=dtestpath,
+            overlays=testsetup.overlays)
+            suite = loader.loadTestsFromNames(args.test)
+    except:
+            force_symlink(result_dir, os.path.join('result', 'failure-latest'))
+            force_symlink(tmp_dir, os.path.join('tmp', 'failure-latest'))
+            print "FAILED TO LOAD! - GOT THIS EXCEPTION:"
+            # Re-raise the exception
+            raise
+
+    import dtest.runner
+    result = dtest.runner.DTestRunner().run(suite._tests[0],
+                          result_dir, tmp_dir)
+
+
+    if result.wasSuccessful():
+        print "PASS"
+        force_symlink(result_dir, os.path.join('result', 'success-latest'))
+        force_symlink(tmp_dir, os.path.join('tmp', 'success-latest'))
+        sys.exit(0)
+    elif len(result.errors):
+        print "ERROR"
+        sys.exit(2)
+    else:
+        force_symlink(result_dir, os.path.join('result', 'failure-latest'))
+        force_symlink(tmp_dir, os.path.join('tmp', 'failure-latest'))
+        print "FAIL"
+        sys.exit(1)
